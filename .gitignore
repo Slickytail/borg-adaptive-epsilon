@@ -1,0 +1,11 @@
+# Ignore BORG source files
+borg.*
+mt19937ar.*
+# Ignore COCO source files
+coco.*
+# Ignore experiment results
+exdata/
+# Ignore binaries and executables
+experiment.o
+experiment
+
