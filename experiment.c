@@ -24,22 +24,13 @@ static const int THREADS = 4;
  * The maximal budget for evaluations done by an optimization algorithm equals dimension * BUDGET_MULTIPLIER.
  * Increase the budget multiplier value gradually to see how it affects the runtime.
  */
-static const unsigned int BUDGET_MULTIPLIER = 1e3;
+static const unsigned int BUDGET_MULTIPLIER = 3e3;
 
-/**
- * The number of evaluations to spend on estimating the epsilon values.
- */
-static const unsigned int EPSILON_EVALUATIONS = BUDGET_MULTIPLIER / 10;
 
 /**
  * Scale multiplier for epsilon values.
  */
 static const float EPSILON_SCALE = 1e-5;
-
-/**
- * The random seed used for the experiment.
- */
-static const unsigned int RANDOM_SEED = 0xc0c0;
 
 /**
  * A function type for evaluation functions, where the first argument is the vector to be evaluated and the
@@ -52,7 +43,6 @@ typedef void (*evaluate_function_t)(const double *x, double *y);
  * algorithm and the COCO platform).
  */
 static coco_problem_t *PROBLEM;
-
 
 /**
  * Evaluates the function and constraints.
@@ -95,8 +85,10 @@ static int compare_doubles(const void *a, const void *b) {
 void experiment(const char *suite_name,
                 const char *suite_options,
                 const char *observer_name,
-                const char *observer_options,
-                coco_random_state_t *random_generator);
+                const char *observer_options);
+
+void adapt_epsilons(BORG_Algorithm algorithm,
+                    BORG_Problem problem);
 
 int main(void) {
 
@@ -120,11 +112,9 @@ int main(void) {
             char suite_options[100];
             sprintf(suite_options, "function_indices: %i-%i", lower_bound, upper_bound);
 
-            // initialize the random number generator
-            coco_random_state_t *random_generator = coco_random_new(RANDOM_SEED + i);
             // call the experiment
             printf("Starting thread %d.\n", i);
-            experiment("bbob-biobj", suite_options, "bbob-biobj", observer_options, random_generator);
+            experiment("bbob-biobj", suite_options, "bbob-biobj", observer_options);
 
             printf("Thread %d finished.\n", i);
             exit(0);
@@ -151,8 +141,7 @@ int main(void) {
 void experiment(const char *suite_name,
                 const char *suite_options,
                 const char *observer_name,
-                const char *observer_options,
-                coco_random_state_t *random_generator) {
+                const char *observer_options) {
 
     coco_suite_t *suite;
     coco_observer_t *observer;
@@ -186,51 +175,15 @@ void experiment(const char *suite_name,
                 this_upper += 0.99;
             BORG_Problem_set_bounds(bproblem, i, lower[i], this_upper);
         }
-
-        // Estimate epsilon values
-        // We do this by a random search to estimate the scale of each objective
-        int n_epsilon_evals = dimension * EPSILON_EVALUATIONS;
-        double* random_values = (double*) malloc(objectives * n_epsilon_evals * sizeof(double));
-        double* vars = (double*) malloc(dimension * sizeof(double));
-        double* objs = (double*) malloc(objectives * sizeof(double));
-
-        for (int i = 0; i < n_epsilon_evals; i++) {
-            // Pick a random point in the search space
-            for (int j = 0; j < dimension; j++) {
-                vars[j] = lower[j] + (upper[j] - lower[j]) * coco_random_uniform(random_generator);
-            }
-            coco_evaluate_function(PROBLEM, vars, objs);
-            // copy the objectives into the random_values array
-            // such that the first N values are the first objective, etc.
-            for (int j = 0; j < objectives; j++) {
-                random_values[j * n_epsilon_evals + i] = objs[j];
-            }
-        }
-        // Sort each objective
-        // Note that this is O(n log n) for each objective
-        // and the median-of-medians algorithm is O(n) for each objective
-        // but we don't care because we're only doing it once per problem
+        // Set default epsilon values
+        // If we try to initialize the algorithm before the epsilons are set, borg will complain
         for (int i = 0; i < objectives; i++) {
-            double* this_obj = random_values + i * n_epsilon_evals;
-            qsort(this_obj, n_epsilon_evals, sizeof(double), compare_doubles);
-
-            // Set the epsilon values.
-            // BORG requires that epsilon values be explicitly set.
-            // The use of the epsilon values is that the algorithm will periodly restart
-            // if it hasn't improved by at least epsilon in the last N iterations.
-            // and epsilon-dominance is used to determine if a solution is a "duplicate".
-    //
-            // We'll set epsilon to be the 1st quartile of the objective values minus the min, times a constant
-            double quart = this_obj[n_epsilon_evals / 4];
-            double min = this_obj[0];
-            BORG_Problem_set_epsilon(bproblem, i, (quart - min) * EPSILON_SCALE);
+            BORG_Problem_set_epsilon(bproblem, i, 1e-3);
         }
-        // free memory used in epsilon estimation
-        free(vars);
-        free(objs);
-        free(random_values);
 
-        // Initialize the Borg algorithm
+
+        // Initialize the Borg algorithm.
+        // This initialization routine and parameters is taken from BORG_Algorithm_run
         // create operators with default settings
         BORG_Operator pm = BORG_Operator_create("PM", 1, 1, 2, BORG_Operator_PM);
         BORG_Operator_set_parameter(pm, 0, 1.0 / dimension);
@@ -261,9 +214,7 @@ void experiment(const char *suite_name,
         BORG_Operator_set_parameter(undx, 1, 0.35);
 
         // Create the algorithm with specified operators
-        // Also reduce the initial population size
         BORG_Algorithm algorithm = BORG_Algorithm_create(bproblem, 6);
-        //BORG_Algorithm_set_initial_population_size(algorithm, dimension * 10);
         BORG_Algorithm_set_operator(algorithm, 0, sbx);
         BORG_Algorithm_set_operator(algorithm, 1, de);
         BORG_Algorithm_set_operator(algorithm, 2, pcx);
@@ -271,15 +222,24 @@ void experiment(const char *suite_name,
         BORG_Algorithm_set_operator(algorithm, 4, undx);
         BORG_Algorithm_set_operator(algorithm, 5, um);
 
-        // Inject the initial solution
-        double* x_init = coco_allocate_vector(dimension);
-        coco_problem_get_initial_solution(PROBLEM, x_init);
+        // Estimate epsilon values
+        // We run the first iteration of the algorithm, which will cause it to generate an initial population.
+        BORG_Algorithm_step(algorithm);
+        adapt_epsilons(algorithm, bproblem);
 
-        BORG_Solution initial_solution = BORG_Solution_create(bproblem);
-        BORG_Solution_set_variables(initial_solution, x_init);
-        // evaluate = 1, nfe = 1. 
-        BORG_Algorithm_inject(algorithm, initial_solution, 1, 1);
 
+        #ifdef INJECT_INITIAL_COCO
+            // Inject the initial solution from COCO
+            double* x_init = coco_allocate_vector(dimension);
+            coco_problem_get_initial_solution(PROBLEM, x_init);
+
+            BORG_Solution initial_solution = BORG_Solution_create(bproblem);
+            BORG_Solution_set_variables(initial_solution, x_init);
+            // evaluate = 1, nfe = 1. 
+            BORG_Algorithm_inject(algorithm, initial_solution, 1, 1);
+        #endif
+
+        // Loop the main algorithm iterate
         int evaluations_budget = dimension * BUDGET_MULTIPLIER;
         while (BORG_Algorithm_get_nfe(algorithm) < evaluations_budget) {
             BORG_Algorithm_step(algorithm);
@@ -287,13 +247,6 @@ void experiment(const char *suite_name,
 
         // don't bother getting the result
         // BORG_Archive result = BORG_Algorithm_get_result(algorithm);
-
-        /* Warn if the MOEA didn't use all its evaluations or an unexpected thing happened */
-        long evaluations_done = coco_problem_get_evaluations(PROBLEM);
-        if (evaluations_done < evaluations_budget) {
-            printf("WARNING: Budget has not been exhausted (%lu/%lu evaluations done)!\n",
-                   (unsigned long) evaluations_done, (unsigned long) evaluations_budget);
-        }
 
         // COCO will keep track of the results, so we can immediately free BORG's memory.
         BORG_Operator_destroy(sbx);
@@ -305,14 +258,37 @@ void experiment(const char *suite_name,
         BORG_Operator_destroy(undx);
         BORG_Algorithm_destroy(algorithm);
         BORG_Problem_destroy(bproblem);
-        // Does destroying the algorithm also destroy the initial solution?
-        //BORG_Solution_destroy(initial_solution);
-        coco_free_memory(x_init);
+
+        #ifdef INJECT_INITIAL_COCO
+            // Does destroying the algorithm also destroy the initial solution?
+            //BORG_Solution_destroy(initial_solution);
+            coco_free_memory(x_init);
+        #endif
 
     }
 
     coco_observer_free(observer);
     coco_suite_free(suite);
 
+}
+
+void adapt_epsilons(BORG_Algorithm algorithm, BORG_Problem problem) {
+    // TODO: I've modified the BORG header to allow direct access to some data structures.
+    // It should be possible to use the borg api to do everything in here, but it's definitely more annoying.
+    BORG_Population population = algorithm->population;
+    int popsize = population->size;
+    double* initial_population_objective = (double *) malloc(popsize * sizeof(double));
+    for (int obj = 0; obj < problem->numberOfObjectives; obj++) {
+        // We copy the borg population to a buffer that we can sort
+        for (int i = 0; i < popsize; i++)
+            initial_population_objective[i] = population->members[i]->objectives[obj];
+        // Sort the objective values
+        qsort(initial_population_objective, popsize, sizeof(double), compare_doubles);
+
+        // We'll set epsilon to be the 1st quartile of the objective values minus the min, times a constant
+        double quart = initial_population_objective[popsize / 4];
+        double min = initial_population_objective[0];
+        BORG_Problem_set_epsilon(problem, obj, (quart - min) * EPSILON_SCALE);
+    }
 }
 
