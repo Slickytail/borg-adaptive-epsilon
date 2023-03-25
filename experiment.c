@@ -3,10 +3,12 @@
  */
 #include <math.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <sys/wait.h>
 
 #include "coco.h"
@@ -15,22 +17,33 @@
 #define max(a,b) ((a) > (b) ? (a) : (b))
 
 /**
+ * Whether to print verbose output.
+ */
+static int VERBOSE = 0;
+
+/**
  * The number of threads to use for the experiment.
  * Problems in a suite will be divided among threads and each thread will run solve problems synchronously.
  */
-static const int THREADS = 4;
+static int THREADS = 4;
 
 /**
  * The maximal budget for evaluations done by an optimization algorithm equals dimension * BUDGET_MULTIPLIER.
- * Increase the budget multiplier value gradually to see how it affects the runtime.
  */
-static const unsigned int BUDGET_MULTIPLIER = 3e3;
+static long BUDGET_MULTIPLIER = 1e3;
 
 
 /**
- * Scale multiplier for epsilon values.
+ * Epsilon scale multiplier for initial adaptation.
  */
-static const float EPSILON_SCALE = 1e-5;
+static double ETA = 1e-4;
+
+
+/**
+ * Whether to inject the initial COCO solution
+ */
+static int INJECT_INITIAL_COCO = 0;
+
 
 /**
  * A function type for evaluation functions, where the first argument is the vector to be evaluated and the
@@ -88,12 +101,72 @@ void experiment(const char *suite_name,
                 const char *observer_options);
 
 void adapt_epsilons(BORG_Algorithm algorithm,
-                    BORG_Problem problem);
+                    BORG_Problem problem,
+                    double multiplier,
+                    int decrease_only);
 
-int main(void) {
+void adapt_epsilons_hypervolume(
+                    BORG_Algorithm algorithm,
+                    BORG_Problem problem,
+                    double multiplier,
+                    int decrease_only);
 
-    /* Change the log level to "warning" to get less output */
-    coco_set_log_level("warning");
+int main(int argc, char **argv) {
+    // Parse arguments
+    int c;
+    static struct option long_options[] = {
+        {"verbose", no_argument, &VERBOSE, 1},
+        {"inject", no_argument, &INJECT_INITIAL_COCO, 1},
+        {"threads", required_argument, 0, 't'},
+        {"budget", required_argument, 0, 'b'},
+        {"eta", required_argument, 0, 'e'},
+        {0, 0, 0, 0}
+    };
+    while (1) {
+        int option_index = 0;
+        c = getopt_long(argc, argv, "t:b:e:",
+                        long_options, &option_index);
+        if (c == -1) break;
+
+        // switch to handle argument values
+        // strtol sets errno if it fails
+        errno = 0;
+        switch (c) {
+            case 0:
+                break;
+            case 't':
+                THREADS = (int) strtol(optarg, NULL, 10);
+                if (errno != 0 || THREADS < 1) {
+                    printf("Invalid thread count: %s\n", optarg);
+                    exit(1);
+                }
+                break;
+            case 'b':
+                // we parse as a long double to correctly parse scientific notation
+                BUDGET_MULTIPLIER = (long) strtold(optarg, NULL);
+                if (errno != 0 || BUDGET_MULTIPLIER < 1) {
+                    printf("Invalid budget: %s\n", optarg);
+                    exit(1);
+                }
+                break;
+            case 'e':
+                ETA = strtod(optarg, NULL);
+                if (errno != 0 || ETA < 0) {
+                    printf("Invalid eta: %s\n", optarg);
+                    exit(1);
+                }
+                break;
+            default:
+                abort();
+        }
+    }
+    // End of argument parsing
+
+    // info log level is more verbose than warning
+    if (VERBOSE)
+        coco_set_log_level("info");
+    else
+        coco_set_log_level("warning");
 
     printf("Running the Borg MOEA Experiment\n");
     fflush(stdout);
@@ -178,7 +251,7 @@ void experiment(const char *suite_name,
         // Set default epsilon values
         // If we try to initialize the algorithm before the epsilons are set, borg will complain
         for (int i = 0; i < objectives; i++) {
-            BORG_Problem_set_epsilon(bproblem, i, 1e-3);
+            BORG_Problem_set_epsilon(bproblem, i, 1e-4);
         }
 
 
@@ -215,6 +288,8 @@ void experiment(const char *suite_name,
 
         // Create the algorithm with specified operators
         BORG_Algorithm algorithm = BORG_Algorithm_create(bproblem, 6);
+        // Set the initial population size
+        //BORG_Algorithm_set_initial_population_size(algorithm, 10 * dimension);
         BORG_Algorithm_set_operator(algorithm, 0, sbx);
         BORG_Algorithm_set_operator(algorithm, 1, de);
         BORG_Algorithm_set_operator(algorithm, 2, pcx);
@@ -225,10 +300,10 @@ void experiment(const char *suite_name,
         // Estimate epsilon values
         // We run the first iteration of the algorithm, which will cause it to generate an initial population.
         BORG_Algorithm_step(algorithm);
-        adapt_epsilons(algorithm, bproblem);
+        // Which method to adapt?
+        adapt_epsilons(algorithm, bproblem, ETA, 0);
 
-
-        #ifdef INJECT_INITIAL_COCO
+        if (INJECT_INITIAL_COCO) {
             // Inject the initial solution from COCO
             double* x_init = coco_allocate_vector(dimension);
             coco_problem_get_initial_solution(PROBLEM, x_init);
@@ -237,10 +312,13 @@ void experiment(const char *suite_name,
             BORG_Solution_set_variables(initial_solution, x_init);
             // evaluate = 1, nfe = 1. 
             BORG_Algorithm_inject(algorithm, initial_solution, 1, 1);
-        #endif
+            // free the memory storing the coco initial solution
+            // this is safe because borg has already copied it into its initial solution
+            coco_free_memory(x_init);
+        }
 
         // Loop the main algorithm iterate
-        int evaluations_budget = dimension * BUDGET_MULTIPLIER;
+        long evaluations_budget = dimension * BUDGET_MULTIPLIER;
         while (BORG_Algorithm_get_nfe(algorithm) < evaluations_budget) {
             BORG_Algorithm_step(algorithm);
         }
@@ -259,12 +337,6 @@ void experiment(const char *suite_name,
         BORG_Algorithm_destroy(algorithm);
         BORG_Problem_destroy(bproblem);
 
-        #ifdef INJECT_INITIAL_COCO
-            // Does destroying the algorithm also destroy the initial solution?
-            //BORG_Solution_destroy(initial_solution);
-            coco_free_memory(x_init);
-        #endif
-
     }
 
     coco_observer_free(observer);
@@ -272,7 +344,7 @@ void experiment(const char *suite_name,
 
 }
 
-void adapt_epsilons(BORG_Algorithm algorithm, BORG_Problem problem) {
+void adapt_epsilons(BORG_Algorithm algorithm, BORG_Problem problem, double multiplier, int decrease_only) {
     // TODO: I've modified the BORG header to allow direct access to some data structures.
     // It should be possible to use the borg api to do everything in here, but it's definitely more annoying.
     BORG_Population population = algorithm->population;
@@ -288,7 +360,39 @@ void adapt_epsilons(BORG_Algorithm algorithm, BORG_Problem problem) {
         // We'll set epsilon to be the 1st quartile of the objective values minus the min, times a constant
         double quart = initial_population_objective[popsize / 4];
         double min = initial_population_objective[0];
-        BORG_Problem_set_epsilon(problem, obj, (quart - min) * EPSILON_SCALE);
+        double new_epsilon = (quart - min) * multiplier;
+        // If decrease_only is set, only apply the update if the new epsilon is smaller
+        // This ensures that the new epsilon-dominance relation is weaker than the old one,
+        // so it remains satisfied.
+        if ((new_epsilon < problem->epsilons[obj]) || !decrease_only)
+            BORG_Problem_set_epsilon(problem, obj, new_epsilon);
     }
 }
 
+void adapt_epsilons_hypervolume(BORG_Algorithm algorithm, BORG_Problem problem, double multiplier, int decrease_only) {
+    // Compute the max and min for the pareto front from the BORG archive
+    int nobj = problem->numberOfObjectives;
+    double* max = (double *) malloc(nobj * sizeof(double));
+    double* min = (double *) malloc(nobj * sizeof(double));
+    for (int i = 0; i < nobj; i++) {
+        max[i] = -INFINITY;
+        min[i] = INFINITY;
+    }
+    BORG_Archive archive = BORG_Algorithm_get_result(algorithm);
+    int size = BORG_Archive_get_size(archive);
+    for (int i = 0; i < size; i++) {
+        BORG_Solution solution = BORG_Archive_get(archive, i);
+        for (int j = 0; j < nobj; j++) {
+            double obj = BORG_Solution_get_objective(solution, j);
+            if (obj > max[j])
+                max[j] = obj;
+            if (obj < min[j])
+                min[j] = obj;
+        }
+    }
+    for (int i = 0; i < nobj; i++) {
+        double new_epsilon = (max[i] - min[i]) * multiplier;
+        if ((new_epsilon < problem->epsilons[i]) || !decrease_only)
+            BORG_Problem_set_epsilon(problem, i, new_epsilon);
+    }
+}
