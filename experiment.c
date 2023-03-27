@@ -46,12 +46,6 @@ static int INJECT_INITIAL_COCO = 0;
 
 
 /**
- * A function type for evaluation functions, where the first argument is the vector to be evaluated and the
- * second argument the vector to which the evaluation result is stored.
- */
-typedef void (*evaluate_function_t)(const double *x, double *y);
-
-/**
  * A pointer to the problem to be optimized (needed in order to simplify the interface between the optimization
  * algorithm and the COCO platform).
  */
@@ -114,7 +108,7 @@ void adapt_epsilons_hypervolume(
 int main(int argc, char **argv) {
     // Parse arguments
     int c;
-    static struct option long_options[] = {
+    const struct option long_options[] = {
         {"verbose", no_argument, &VERBOSE, 1},
         {"inject", no_argument, &INJECT_INITIAL_COCO, 1},
         {"threads", required_argument, 0, 't'},
@@ -251,7 +245,7 @@ void experiment(const char *suite_name,
         // Set default epsilon values
         // If we try to initialize the algorithm before the epsilons are set, borg will complain
         for (int i = 0; i < objectives; i++) {
-            BORG_Problem_set_epsilon(bproblem, i, 1e-4);
+            BORG_Problem_set_epsilon(bproblem, i, 1e-2);
         }
 
 
@@ -297,12 +291,11 @@ void experiment(const char *suite_name,
         BORG_Algorithm_set_operator(algorithm, 4, undx);
         BORG_Algorithm_set_operator(algorithm, 5, um);
 
+
         // Estimate epsilon values
         // We run the first iteration of the algorithm, which will cause it to generate an initial population.
-        BORG_Algorithm_step(algorithm);
-        // Which method to adapt?
-        adapt_epsilons(algorithm, bproblem, ETA, 0);
-
+        //BORG_Algorithm_step(algorithm);
+        // We have to do this after the first step, otherwise the initial population will be 1??
         if (INJECT_INITIAL_COCO) {
             // Inject the initial solution from COCO
             double* x_init = coco_allocate_vector(dimension);
@@ -316,11 +309,19 @@ void experiment(const char *suite_name,
             // this is safe because borg has already copied it into its initial solution
             coco_free_memory(x_init);
         }
+        // With our initial population, set the epsilons.
+        //adapt_epsilons(algorithm, bproblem, ETA, 0);
 
         // Loop the main algorithm iterate
         long evaluations_budget = dimension * BUDGET_MULTIPLIER;
-        while (BORG_Algorithm_get_nfe(algorithm) < evaluations_budget) {
+        int adapted = 0;
+        int evals = 0;
+        while ((evals = BORG_Algorithm_get_nfe(algorithm)) < evaluations_budget) {
             BORG_Algorithm_step(algorithm);
+            if (!adapted && evals >= 200) {
+                adapted = 1;
+                adapt_epsilons_hypervolume(algorithm, bproblem, ETA, 0);
+            }
         }
 
         // don't bother getting the result
@@ -392,7 +393,7 @@ void adapt_epsilons_hypervolume(BORG_Algorithm algorithm, BORG_Problem problem, 
     }
     for (int i = 0; i < nobj; i++) {
         double new_epsilon = (max[i] - min[i]) * multiplier;
-        if ((new_epsilon < problem->epsilons[i]) || !decrease_only)
+        if (!decrease_only || new_epsilon < problem->epsilons[i])
             BORG_Problem_set_epsilon(problem, i, new_epsilon);
     }
 }
