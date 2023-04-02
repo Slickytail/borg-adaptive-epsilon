@@ -318,8 +318,8 @@ void experiment(const char *suite_name,
         int evals = 0;
         while ((evals = BORG_Algorithm_get_nfe(algorithm)) < evaluations_budget) {
             BORG_Algorithm_step(algorithm);
-            if (!adapted && evals >= 200) {
-                adapted = 1;
+            if ( (200 * (1 << adapted) <= evals) && (4 * evals <= evaluations_budget) ) {
+                adapted++;
                 adapt_epsilons_hypervolume(algorithm, bproblem, ETA, 0);
             }
         }
