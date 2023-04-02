@@ -94,16 +94,10 @@ void experiment(const char *suite_name,
                 const char *observer_name,
                 const char *observer_options);
 
-void adapt_epsilons(BORG_Algorithm algorithm,
-                    BORG_Problem problem,
-                    double multiplier,
-                    int decrease_only);
-
 void adapt_epsilons_hypervolume(
                     BORG_Algorithm algorithm,
                     BORG_Problem problem,
-                    double multiplier,
-                    int decrease_only);
+                    double multiplier);
 
 int main(int argc, char **argv) {
     // Parse arguments
@@ -316,11 +310,12 @@ void experiment(const char *suite_name,
         long evaluations_budget = dimension * BUDGET_MULTIPLIER;
         int adapted = 0;
         int evals = 0;
+        double specific_eta = ETA * (1 + ((double) dimension) / 10);
         while ((evals = BORG_Algorithm_get_nfe(algorithm)) < evaluations_budget) {
             BORG_Algorithm_step(algorithm);
             if ( (200 * (1 << adapted) <= evals) && (4 * evals <= evaluations_budget) ) {
                 adapted++;
-                adapt_epsilons_hypervolume(algorithm, bproblem, ETA, 0);
+                adapt_epsilons_hypervolume(algorithm, bproblem, specific_eta);
             }
         }
 
@@ -345,34 +340,9 @@ void experiment(const char *suite_name,
 
 }
 
-void adapt_epsilons(BORG_Algorithm algorithm, BORG_Problem problem, double multiplier, int decrease_only) {
-    // TODO: I've modified the BORG header to allow direct access to some data structures.
-    // It should be possible to use the borg api to do everything in here, but it's definitely more annoying.
-    BORG_Population population = algorithm->population;
-    int popsize = population->size;
-    double* initial_population_objective = (double *) malloc(popsize * sizeof(double));
-    for (int obj = 0; obj < problem->numberOfObjectives; obj++) {
-        // We copy the borg population to a buffer that we can sort
-        for (int i = 0; i < popsize; i++)
-            initial_population_objective[i] = population->members[i]->objectives[obj];
-        // Sort the objective values
-        qsort(initial_population_objective, popsize, sizeof(double), compare_doubles);
-
-        // We'll set epsilon to be the 1st quartile of the objective values minus the min, times a constant
-        double quart = initial_population_objective[popsize / 4];
-        double min = initial_population_objective[0];
-        double new_epsilon = (quart - min) * multiplier;
-        // If decrease_only is set, only apply the update if the new epsilon is smaller
-        // This ensures that the new epsilon-dominance relation is weaker than the old one,
-        // so it remains satisfied.
-        if ((new_epsilon < problem->epsilons[obj]) || !decrease_only)
-            BORG_Problem_set_epsilon(problem, obj, new_epsilon);
-    }
-}
-
-void adapt_epsilons_hypervolume(BORG_Algorithm algorithm, BORG_Problem problem, double multiplier, int decrease_only) {
+void adapt_epsilons_hypervolume(BORG_Algorithm algorithm, BORG_Problem problem, double multiplier) {
     // Compute the max and min for the pareto front from the BORG archive
-    int nobj = problem->numberOfObjectives;
+    int nobj = BORG_Problem_number_of_objectives(problem);
     double* max = (double *) malloc(nobj * sizeof(double));
     double* min = (double *) malloc(nobj * sizeof(double));
     for (int i = 0; i < nobj; i++) {
@@ -391,9 +361,6 @@ void adapt_epsilons_hypervolume(BORG_Algorithm algorithm, BORG_Problem problem, 
                 min[j] = obj;
         }
     }
-    for (int i = 0; i < nobj; i++) {
-        double new_epsilon = (max[i] - min[i]) * multiplier;
-        if (!decrease_only || new_epsilon < problem->epsilons[i])
-            BORG_Problem_set_epsilon(problem, i, new_epsilon);
-    }
+    for (int i = 0; i < nobj; i++) 
+        BORG_Problem_set_epsilon(problem, i, (max[i] - min[i]) * multiplier);
 }
