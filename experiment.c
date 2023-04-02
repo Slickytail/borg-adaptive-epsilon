@@ -310,12 +310,11 @@ void experiment(const char *suite_name,
         long evaluations_budget = dimension * BUDGET_MULTIPLIER;
         int adapted = 0;
         int evals = 0;
-        double specific_eta = ETA * (1 + ((double) dimension) / 10);
         while ((evals = BORG_Algorithm_get_nfe(algorithm)) < evaluations_budget) {
             BORG_Algorithm_step(algorithm);
             if ( (200 * (1 << adapted) <= evals) && (4 * evals <= evaluations_budget) ) {
                 adapted++;
-                adapt_epsilons_hypervolume(algorithm, bproblem, specific_eta);
+                adapt_epsilons_hypervolume(algorithm, bproblem, ETA);
             }
         }
 
