@@ -28,6 +28,11 @@ static int VERBOSE = 0;
 static int THREADS = 4;
 
 /**
+ * Whether to include dimension 40.
+ */
+static int DIM40 = 0;
+
+/**
  * The maximal budget for evaluations done by an optimization algorithm equals dimension * BUDGET_MULTIPLIER.
  */
 static long BUDGET_MULTIPLIER = 1e3;
@@ -105,6 +110,7 @@ int main(int argc, char **argv) {
     const struct option long_options[] = {
         {"verbose", no_argument, &VERBOSE, 1},
         {"inject", no_argument, &INJECT_INITIAL_COCO, 1},
+        {"dim40", no_argument, &DIM40, 1},
         {"threads", required_argument, 0, 't'},
         {"budget", required_argument, 0, 'b'},
         {"eta", required_argument, 0, 'e'},
@@ -170,8 +176,9 @@ int main(int argc, char **argv) {
             // apparently supposed to be 1-indexed, lol
             int lower_bound = (N_FUNCS * i) / THREADS + 1;
             int upper_bound = (N_FUNCS * (i + 1)) / THREADS;
+            // generate the suite options: the range of function indices, and whether or not to include dimension 40
             char suite_options[100];
-            sprintf(suite_options, "function_indices: %i-%i", lower_bound, upper_bound);
+            sprintf(suite_options, "function_indices: %i-%i dimensions: 2,3,5,10,20%s", lower_bound, upper_bound, DIM40 ? ",40" : "");
 
             // call the experiment
             printf("Starting thread %d.\n", i);
