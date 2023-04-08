@@ -43,6 +43,11 @@ static long BUDGET_MULTIPLIER = 1e3;
  */
 static double ETA = 1e-4;
 
+/**
+ * Whether to fix constant epsilon
+ */
+static double FIXED_EPSILON = 0.0;
+
 
 /**
  * Whether to inject the initial COCO solution
@@ -107,6 +112,7 @@ void adapt_epsilons_hypervolume(
 int main(int argc, char **argv) {
     // Parse arguments
     int c;
+    int eta_was_set = 0;
     const struct option long_options[] = {
         {"verbose", no_argument, &VERBOSE, 1},
         {"inject", no_argument, &INJECT_INITIAL_COCO, 1},
@@ -114,11 +120,12 @@ int main(int argc, char **argv) {
         {"threads", required_argument, 0, 't'},
         {"budget", required_argument, 0, 'b'},
         {"eta", required_argument, 0, 'e'},
+        {"fixed", required_argument, 0, 'f'},
         {0, 0, 0, 0}
     };
     while (1) {
         int option_index = 0;
-        c = getopt_long(argc, argv, "t:b:e:",
+        c = getopt_long(argc, argv, "t:b:e:f:",
                         long_options, &option_index);
         if (c == -1) break;
 
@@ -149,12 +156,24 @@ int main(int argc, char **argv) {
                     printf("Invalid eta: %s\n", optarg);
                     exit(1);
                 }
+                eta_was_set = 1;
+                break;
+            case 'f':
+                FIXED_EPSILON = strtod(optarg, NULL);
+                if (errno != 0 || FIXED_EPSILON < 0) {
+                    printf("Invalid epsilon: %s\n", optarg);
+                    exit(1);
+                }
                 break;
             default:
                 abort();
         }
     }
     // End of argument parsing
+    if (eta_was_set && FIXED_EPSILON != 0) {
+        printf("Cannot set both eta and epsilon\n");
+        exit(1);
+    }
 
     // info log level is more verbose than warning
     if (VERBOSE)
@@ -218,6 +237,11 @@ void experiment(const char *suite_name,
     suite = coco_suite(suite_name, "", suite_options);
     observer = coco_observer(observer_name, observer_options);
 
+    double eps_init = 1e-2;
+    if (FIXED_EPSILON != 0)
+        eps_init = FIXED_EPSILON;
+    
+
     /* Iterate over all problems in the suite */
     while ((PROBLEM = coco_suite_get_next_problem(suite, observer)) != NULL) {
 
@@ -246,7 +270,7 @@ void experiment(const char *suite_name,
         // Set default epsilon values
         // If we try to initialize the algorithm before the epsilons are set, borg will complain
         for (int i = 0; i < objectives; i++) {
-            BORG_Problem_set_epsilon(bproblem, i, 1e-2);
+            BORG_Problem_set_epsilon(bproblem, i, eps_init);
         }
 
 
@@ -319,7 +343,7 @@ void experiment(const char *suite_name,
         int evals = 0;
         while ((evals = BORG_Algorithm_get_nfe(algorithm)) < evaluations_budget) {
             BORG_Algorithm_step(algorithm);
-            if ( (200 * (1 << adapted) <= evals) && (4 * evals <= evaluations_budget) ) {
+            if ( (200 * (1 << adapted) <= evals) && (4 * evals <= evaluations_budget) && (FIXED_EPSILON == 0.0)) {
                 adapted++;
                 adapt_epsilons_hypervolume(algorithm, bproblem, ETA);
             }
